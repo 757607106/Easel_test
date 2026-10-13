@@ -1013,7 +1013,7 @@ if [ -n "$EMBEDDING_API_KEY" ] && [ -n "$EMBEDDING_BASE_URL" ] && [ -n "$EMBEDDI
         oc_set '向量记忆' "$MEM_PREFIX.model" "$EMBEDDING_MODEL"
         oc_set '向量记忆' "$MEM_PREFIX.remote.baseUrl" "$EMBEDDING_BASE_URL"
         oc_set '向量记忆' "$MEM_PREFIX.remote.apiKey" "$EMBEDDING_API_KEY"
-        ok "独立向量模型已配置（$MEM_PREFIX）：$EMBEDDING_MODEL"
+        ok "独立向量模型已配置（${MEM_PREFIX}）：${EMBEDDING_MODEL}"
     fi
 else
     # Deliberate FTS-only mode: never fall back to the chat endpoint for embeddings.
