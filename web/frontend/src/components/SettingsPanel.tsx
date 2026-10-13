@@ -360,6 +360,7 @@ export default function SettingsPanel({ onClose, banner = '' }: Props) {
     // （后端 _SLOT_ENV_KEYS 已含 anthropic，改地址必须重填 Key 那道闸同样生效）。
     anthropic: { model: true, base: true },
     siliconflow: { model: false, base: true },
+    dashscope: { model: true, base: true },
     custom: { model: true, base: true },
   };
 
@@ -397,7 +398,7 @@ export default function SettingsPanel({ onClose, banner = '' }: Props) {
   const setMediaPrimary = (ch: string, i: number) =>
     setMediaRows((m) => ({ ...m, [ch]: (m[ch] || []).map((r, j) => ({ ...r, role: j === i ? '主' : '备' })) }));
 
-  const mediaOk = (ch: string) => (mediaRows[ch] || []).some((r) => r.result === '已配置');
+  const mediaOk = (ch: string) => (mediaRows[ch] || []).some((r) => r.role === '主' && r.result.includes('已配置'));
 
   const cacheKeyFor = (r: ModelRow) => {
     const base = (r.baseUrl || '').trim().replace(/\/+$/, '');
@@ -643,7 +644,7 @@ export default function SettingsPanel({ onClose, banner = '' }: Props) {
     )
   );
 
-  const chatOk = chatRows.length > 0 && !chatRows[0].result.includes('缺');
+  const chatOk = chatRows.some((r) => r.role === '主' && r.result.includes('已配置'));
   const transOk = transRows.length > 1 && transRows[1].result.includes('已配置');
 
   return (
@@ -717,7 +718,7 @@ export default function SettingsPanel({ onClose, banner = '' }: Props) {
                 {chan === 'chat' && (
                   <section className="st-panel active">
                     <div className="panel-top">
-                      <span className={`pill ${chatOk ? 'ok' : 'off'}`}><span className="dot" />{chatOk ? (transport === 'api' ? 'API 已配置' : '主通道在线') : '未配置'}</span>
+                      <span className={`pill ${chatOk ? 'ok' : 'off'}`}><span className="dot" />{chatOk ? (transport === 'api' ? 'API 已配置' : '主通道已配置') : '未配置'}</span>
                       <label className="desc">连接方式： <select value={transport} disabled={saving || modelLoading}
                         onChange={(e) => void changeTransport(e.target.value as 'api' | 'openclaw')}>
                         <option value="api">API 直连（无需 OpenClaw）</option>

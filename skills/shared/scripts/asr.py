@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""asr.py — 语音转字幕（ASR）的确定性封装（faster-whisper + 标准库）。
+"""asr.py — 语音转字幕（阿里云 Flash ASR / 本地 faster-whisper）。
 
 所有"语音/视频 → 字幕文件"类 SKILL（auto-subtitle 等）共用此脚本，避免每次
 现场即兴调 whisper 导致的模型选择、时间戳格式、中文断句不一致等问题。
@@ -7,7 +7,8 @@
 与 video_ops.py 的边界：本脚本只负责"识别语音 → 生成字幕文件（SRT/ASS/TXT/JSON）"，
 不负责把字幕烧录进视频；烧录用 video_ops.py 或 ffmpeg subtitles/ass 滤镜。
 
-依赖：faster-whisper（`pip install faster-whisper`）+ ffmpeg（视频提取音轨）。
+依赖：ffmpeg；本地模式还需要 faster-whisper（`pip install faster-whisper`）。
+ASR_PROVIDER=dashscope 时使用项目 .env 中的阿里云模型、地址和凭据。
 首次运行会从 HuggingFace 下载模型，需外网代理（见下方 _ensure_proxy）。
 
 子命令（均支持 -h）：
@@ -263,6 +264,18 @@ def _render_json(cues: list[tuple[float, float, str]], meta: dict) -> str:
 
 # ── 转录核心 ──────────────────────────────────────────────────────────
 def _transcribe_audio(audio: Path, a) -> tuple[list[tuple[float, float, str]], dict]:
+    from model_registry import read_env_file
+    env = read_env_file()
+    provider = getattr(a, "provider", None) or env.get("ASR_PROVIDER") or "local"
+    if provider == "dashscope":
+        from aliyun_asr import transcribe
+        try:
+            return transcribe(audio, env, a)
+        except (RuntimeError, OSError, ValueError) as error:
+            _die(str(error), 4)
+    if provider != "local":
+        _die(f"不支持的转写 provider：{provider}", 2)
+    a.model = a.model or "base"
     try:
         from faster_whisper import WhisperModel
     except ImportError:
@@ -437,7 +450,9 @@ def _add_transcribe_args(p) -> None:
                    help="输出路径（默认 outputs/<输入文件名>/<输入文件名>.<format>）")
     p.add_argument("--format", choices=["srt", "ass", "txt", "json"],
                    default="srt", help="输出格式（默认 srt）")
-    p.add_argument("--model", default="base",
+    p.add_argument("--provider", choices=["local", "dashscope"],
+                   help="转写服务，默认读 ASR_PROVIDER；未配置时使用本地 whisper")
+    p.add_argument("--model", default=None,
                    help=f"模型 {'/'.join(_MODELS)}（默认 base）")
     p.add_argument("--language", default="auto",
                    help="语言码如 zh/en，默认 auto 自动检测")

@@ -1497,8 +1497,9 @@ def _model_channels() -> dict:
         })
     elif ob or ok_key:
         chat_rows.append({
-            "slot": "openai", "order": 1, "name": "deepseek",
-            "sub": "官方直连",
+            "slot": "openai", "order": 1,
+            "name": "阿里云百炼" if (urllib.parse.urlsplit(ob).hostname or "").endswith("aliyuncs.com") else "OpenAI 兼容",
+            "sub": "API 通道",
             "type": "openai", "model": om or "deepseek-chat",
             "baseUrl": ob, "keyMasked": _mask_key(env.get("OPENAI_API_KEY", "") if ok_key else ""),
             "role": "主" if primary.startswith("openai/") else "备",
@@ -1582,6 +1583,14 @@ def _model_channels() -> dict:
          "keyMasked": _mask_key(env.get("SILICONFLOW_API_KEY", "")), "role": "主",
          "result": "已配置" if sf else "缺 key"},
     ]
+    if env.get("ASR_PROVIDER") == "dashscope":
+        trans_rows = [trans_rows[0], {
+            "slot": "dashscope", "order": 1, "name": "阿里千问语音识别", "sub": "阿里云百炼",
+            "type": "dashscope", "model": env.get("DASHSCOPE_ASR_MODEL", "qwen-audio-3.0-asr-flash"),
+            "baseUrl": env.get("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"),
+            "keyMasked": _mask_key(env.get("DASHSCOPE_API_KEY", "")), "role": "主",
+            "result": "已配置" if _is_set(env.get("DASHSCOPE_API_KEY")) else "缺 key",
+        }]
     channels: dict = {"chat": {"rows": chat_rows}, "transcribe": {"rows": trans_rows}}
     try:
         import model_registry as _mr  # skills/shared/scripts 已在 sys.path 上
@@ -1623,6 +1632,22 @@ def _model_channels() -> dict:
                 })
             channels[_ch] = {"rows": _rows}
     except Exception:  # noqa: BLE001
+        pass
+    # 本机安装验证的结果只绑定到同一模型、地址和凭据，配置变更后不会复用旧结果。
+    try:
+        checks = json.loads((PROJECT_ROOT / "outputs" / "_install" / "model-verification.json").read_text(encoding="utf-8"))
+        for ch, content in channels.items():
+            for row in content["rows"]:
+                for check in checks.get("results", []):
+                    if (check.get("channel"), check.get("slot"), check.get("model"), check.get("baseUrl")) != (
+                            ch, row.get("slot"), row.get("model"), row.get("baseUrl")):
+                        continue
+                    key = env.get("OPENAI_API_KEY", "") if ch == "chat" else env.get(
+                        "IMG_API_KEY" if ch == "image" else "DASHSCOPE_API_KEY", "")
+                    if hashlib.sha256(key.encode()).hexdigest() != check.get("credentialHash"):
+                        continue
+                    row["result"] = "已配置 · 上次实测通过" if check.get("ok") else check.get("detail", "未通过自测")
+    except (OSError, ValueError, TypeError):
         pass
     return {"channels": channels, "primary": primary,
             "transport": "api" if direct else "openclaw"}
@@ -1876,12 +1901,12 @@ async def api_settings_models_save(req: ModelSaveRequest):
             name in os.environ for name in (
                 "EASEL_DIRECT_API_BASE_URL", "EASEL_DIRECT_API_MODEL", "EASEL_DIRECT_API_KEY")):
         raise HTTPException(409, "运行环境已指定直连配置，请修改启动环境后重启")
-    if ch0 in ("speech", "image", "video", "music"):
+    if ch0 in ("speech", "image", "video", "music") or (ch0 == "transcribe" and any(r.slot == "dashscope" for r in req.rows)):
         import model_registry as _mr2
-        _gid0 = {"speech": "voice", "image": "image", "video": "video", "music": "music"}[ch0]
+        _gid0 = {"speech": "voice", "image": "image", "video": "video", "music": "music", "transcribe": "transcribe"}[ch0]
         _spec0 = _mr2.MODEL_GROUPS[_gid0]
         _by_id = {p["id"]: p for p in _spec0["providers"]}
-        _setting0 = {"video": "VIDEO_PROVIDER", "music": "MUSIC_PROVIDER", "voice": "VOICE_PROVIDER"}.get(_gid0)
+        _setting0 = {"video": "VIDEO_PROVIDER", "music": "MUSIC_PROVIDER", "voice": "VOICE_PROVIDER", "transcribe": "ASR_PROVIDER"}.get(_gid0)
         _mupd: dict[str, str] = {}
         _primary0 = ""
         _env0 = _read_env()
@@ -2346,8 +2371,12 @@ async def api_models_selftest(req: SelftestRequest):
             if base.strip() and (key.strip() or direct):
                 targets.append((base.strip().rstrip("/"), key.strip(), is_anthropic, slot))
     if channel in ("transcribe", "all") and (env.get("SILICONFLOW_API_KEY") or "").strip():
-        targets.append(((env.get("SILICONFLOW_BASE_URL") or "https://api.siliconflow.cn/v1").strip().rstrip("/"),
-                        env["SILICONFLOW_API_KEY"].strip(), False, "siliconflow"))
+        if env.get("ASR_PROVIDER") != "dashscope":
+            targets.append(((env.get("SILICONFLOW_BASE_URL") or "https://api.siliconflow.cn/v1").strip().rstrip("/"),
+                            env["SILICONFLOW_API_KEY"].strip(), False, "siliconflow"))
+    if channel in ("transcribe", "all") and env.get("ASR_PROVIDER") == "dashscope" and env.get("DASHSCOPE_API_KEY"):
+        targets.append(((env.get("DASHSCOPE_BASE_URL") or "https://dashscope.aliyuncs.com/api/v1").rstrip("/"),
+                        env["DASHSCOPE_API_KEY"].strip(), False, "dashscope-asr"))
 
     # 这里会把真实 API Key 当 Bearer 发出去，所以目标地址必须先过闸：
     # 合法 http(s)、且不指向本机/内网/云元数据；跳转也不跟（跟了等于绕过前面的判断）。
@@ -2378,7 +2407,12 @@ async def api_models_selftest(req: SelftestRequest):
                 })
             else:
                 headers = {"Authorization": f"Bearer {key}"} if key else {}
-                rq = urllib.request.Request(base + "/models", headers=headers)
+                model_url = base + "/models"
+                if slot == "dashscope-asr":
+                    parsed = urllib.parse.urlsplit(base)
+                    model_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc,
+                                                        "/compatible-mode/v1/models", "", ""))
+                rq = urllib.request.Request(model_url, headers=headers)
             opener = _opener
             if slot == "direct-api" and base == env.get("EASEL_DIRECT_API_BASE_URL", "").strip().rstrip("/"):
                 opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))

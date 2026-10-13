@@ -36,6 +36,12 @@ ORIGINAL_ENV = (
 @pytest.fixture()
 def sandbox(tmp_path, monkeypatch):
     """把 .env 与 openclaw.json 都换到沙箱，绝不碰用户真配置。"""
+    # 探针已拦截；DNS 也要固定，避免本机 VPN 的 fake-IP 导致 SSRF 闸误拒测试域名。
+    resolve = web.socket.getaddrinfo
+    monkeypatch.setattr(web.socket, "getaddrinfo", lambda host, port, *a, **kw:
+                        [(web.socket.AF_INET, web.socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))]
+                        if host in ("api.openai.com", "api.anthropic.com")
+                        else resolve(host, port, *a, **kw))
     env_file = tmp_path / ".env"
     env_file.write_text(ORIGINAL_ENV, encoding="utf-8")
     monkeypatch.setattr(web, "ENV_FILE", env_file)

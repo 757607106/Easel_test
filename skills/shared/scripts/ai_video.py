@@ -290,7 +290,7 @@ def resolve_model(provider: str, explicit: str | None = None, *, image: bool = F
     if explicit and explicit.strip():
         return explicit.strip()
     env_names = {
-        "dashscope": ("DASHSCOPE_VIDEO_MODEL",),
+        "dashscope": (("DASHSCOPE_I2V_MODEL", "DASHSCOPE_VIDEO_MODEL") if image else ("DASHSCOPE_VIDEO_MODEL",)),
         "ark": ("ARK_MODEL",),
         "openai-compatible": ("VIDEO_MODEL",),
         "xhs-maas": (("XHS_MAAS_I2V_MODEL",) if image else ("XHS_MAAS_T2V_MODEL",)),
@@ -299,6 +299,8 @@ def resolve_model(provider: str, explicit: str | None = None, *, image: bool = F
     for name in env_names:
         value = env_lookup(name)
         if value:
+            if provider == "dashscope" and image and value.endswith("-t2v"):
+                return value[:-4] + "-i2v"
             return value
     defaults = {
         "dashscope": DEFAULT_DASHSCOPE_MODEL,
@@ -423,14 +425,17 @@ def generate_dashscope(args: argparse.Namespace, image: str | None) -> Path:
     base = (os.environ.get("DASHSCOPE_BASE_URL", "").strip() or DEFAULT_DASHSCOPE_BASE).rstrip("/")
     model = resolve_model("dashscope", args.model, image=image is not None)
     if image:
-        endpoint = f"{base}/services/aigc/image2video/video-synthesis"
+        endpoint = f"{base}/services/aigc/video-generation/video-synthesis"
         input_block = {"img_url": _image_to_data_or_url(image), "prompt": args.prompt or ""}
     else:
-        endpoint = f"{base}/services/aigc/text2video/video-synthesis"
+        endpoint = f"{base}/services/aigc/video-generation/video-synthesis"
         input_block = {"prompt": args.prompt}
     params: dict[str, Any] = {}
     if args.ratio:
-        params["size"] = args.ratio.replace(":", "*")
+        sizes = {"16:9": "1280*720", "9:16": "720*1280", "1:1": "960*960"}
+        if args.ratio not in sizes:
+            fail("阿里万相视频比例支持 16:9、9:16、1:1。")
+        params["size"] = sizes[args.ratio]
     if args.duration:
         params["duration"] = args.duration
     payload = {"model": model, "input": input_block, "parameters": params}

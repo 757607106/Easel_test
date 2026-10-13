@@ -15,7 +15,7 @@
   - IMG_API_KEY:  API key
 兼容别名：
   - IMG_BASE_URL ← OPENAI_BASE_URL / OPENAI_API_BASE / BASE_URL
-  - IMG_MODEL    ← OPENAI_IMAGE_MODEL / IMAGE_MODEL / OPENAI_MODEL
+  - IMG_MODEL    ← OPENAI_IMAGE_MODEL / IMAGE_MODEL（不使用聊天模型 OPENAI_MODEL）
   - IMG_API_KEY  ← OPENAI_API_KEY / API_KEY
 
 子命令：
@@ -49,7 +49,7 @@ ENV_MODEL = "IMG_MODEL"
 ENV_API_KEY = "IMG_API_KEY"
 ENV_ALIASES = {
     ENV_BASE_URL: ("OPENAI_BASE_URL", "OPENAI_API_BASE", "BASE_URL"),
-    ENV_MODEL: ("OPENAI_IMAGE_MODEL", "IMAGE_MODEL", "OPENAI_MODEL"),
+    ENV_MODEL: ("OPENAI_IMAGE_MODEL", "IMAGE_MODEL"),
     ENV_API_KEY: ("OPENAI_API_KEY", "API_KEY"),
 }
 
@@ -194,6 +194,8 @@ def detect_provider(base_url: str) -> str:
     # 已知 Agnes 域名（官方文档 api.agnes-ai.cn；apihub.agnes-ai.com 见仓库内引用）。
     AGNES_DOMAINS = ("agnes-ai.cn", "agnes-ai.com")
     host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
+    if host == "dashscope.aliyuncs.com" or host.endswith(".maas.aliyuncs.com"):
+        return "aliyun"
     # 对已知 Agnes 域名做精确后缀匹配，不用子串包含 —— 否则像
     # stagneschurch.com / magnes.com 这类「含 agnes 字母序列」的无关域名
     # 会被误判成 Agnes，被打到不存在端点的分支上全部报错（404）。
@@ -595,6 +597,14 @@ def cmd_img2img(args: argparse.Namespace) -> None:
         result = _agnes_generate(base_url, api_key, model, prompt, args,
                                  images=[encode_image_data_uri(args.image)])
         paths = save_sync_data(result, args.output, args.format)
+    elif detect_provider(base_url) == "aliyun":
+        if args.mask:
+            fail("阿里云千问生图接口不支持 --mask 局部编辑。")
+        result = http_post(_api_url(base_url, "images/generations"), api_key,
+                           {"model": model, "prompt": prompt,
+                            "image": encode_image_data_uri(args.image),
+                            "n": args.n, "size": args.size}, timeout=180)
+        paths = save_sync_data(result, args.output, args.format)
     else:
         # OpenAI 兼容 /images/edits：优先 multipart，失败时回退 JSON data-uri
         result = _post_edits_multipart(base_url, api_key, model, prompt, args)
@@ -691,6 +701,13 @@ def cmd_variations(args: argparse.Namespace) -> None:
         prompt = args.prompt or "generate a variation of the reference image"
         result = _agnes_generate(base_url, api_key, model, prompt, args,
                                  images=[encode_image_data_uri(args.image)])
+        paths = save_sync_data(result, args.output, args.format)
+    elif detect_provider(base_url) == "aliyun":
+        result = http_post(_api_url(base_url, "images/generations"), api_key,
+                           {"model": model,
+                            "prompt": args.prompt or "生成参考图片的一个新变体，保留主体和风格",
+                            "image": encode_image_data_uri(args.image),
+                            "n": args.n, "size": args.size}, timeout=180)
         paths = save_sync_data(result, args.output, args.format)
     else:
         path, mime = _check_image(args.image)

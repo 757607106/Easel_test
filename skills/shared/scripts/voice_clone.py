@@ -278,6 +278,8 @@ def enroll_dashscope(a) -> str:
     key = require_env("DASHSCOPE_API_KEY")
     base = (os.environ.get("DASHSCOPE_BASE_URL", "").strip()
             or "https://dashscope.aliyuncs.com").rstrip("/")
+    if base.endswith("/api/v1"):
+        base = base[:-len("/api/v1")]
     if not a.sample_url:
         fail("dashscope 声音复刻需公网可访问的样本 URL：--sample-url。")
     voice_prefix = a.name or f"pc{uuid.uuid4().hex[:6]}"
@@ -342,7 +344,38 @@ def clone_dashscope(a, out: Path) -> Path:
     key = require_env("DASHSCOPE_API_KEY")
     base = (os.environ.get("DASHSCOPE_BASE_URL", "").strip()
             or "https://dashscope.aliyuncs.com").rstrip("/")
+    if base.endswith("/api/v1"):
+        base = base[:-len("/api/v1")]
     model = a.model or os.environ.get("DASHSCOPE_TTS_MODEL", "").strip() or "cosyvoice-v2"
+    if model.startswith("qwen") and "tts" in model:
+        voice = a.voice_id or os.environ.get("VOICE_NARRATOR_VOICE_ID", "").strip() or "Cherry"
+        inp: dict[str, Any] = {"text": a.text, "voice": voice, "language_type": "Auto"}
+        if getattr(a, "emotion", None):
+            if "instruct" not in model:
+                fail("当前千问 TTS 模型不支持情绪指令，请选择 qwen3-tts-instruct-flash。")
+            inp["instructions"] = instruct_text(a.emotion)
+        resp = http_json(f"{base}/api/v1/services/aigc/multimodal-generation/generation",
+                         {"Authorization": f"Bearer {key}"},
+                         {"model": model, "input": inp})
+        url = _find_url(resp)
+        if url:
+            # 千问返回 WAV，按输出扩展名转码，避免把 WAV 冒充 MP3。
+            import tempfile
+            import subprocess
+            import shutil
+            if out.suffix.lower() == ".wav":
+                return download(url, out)
+            if not shutil.which("ffmpeg"):
+                fail("千问 TTS 转换音频格式需要 ffmpeg；也可以输出 .wav。")
+            with tempfile.TemporaryDirectory(prefix="easel-qwen-tts-") as folder:
+                wav = download(url, Path(folder) / "speech.wav")
+                out.parent.mkdir(parents=True, exist_ok=True)
+                proc = subprocess.run(["ffmpeg", "-y", "-i", str(wav), str(out)],
+                                      capture_output=True, text=True)
+                if proc.returncode:
+                    fail("千问 TTS 音频格式转换失败：" + proc.stderr[-250:])
+            return out
+        fail(f"千问 TTS 未返回音频 URL：{json.dumps(resp, ensure_ascii=False)[:300]}")
     if not a.voice_id:
         fail("dashscope 合成需 --voice-id（先 enroll 声音复刻）。")
     inp: dict[str, Any] = {"text": a.text, "voice": a.voice_id}

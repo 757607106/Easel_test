@@ -22,6 +22,19 @@ def _key(env: str, label: str, *, required: bool = True, secret: bool = True,
 
 
 MODEL_GROUPS: dict[str, dict[str, Any]] = {
+    "transcribe": {
+        "label": "云端语音转写",
+        "settings": [_key("ASR_PROVIDER", "默认转写 provider", required=False, secret=False,
+                          choices=("dashscope", "local"))],
+        "providers": [{
+            "id": "dashscope", "name": "阿里千问语音识别", "keys": [
+                _key("DASHSCOPE_API_KEY", "DashScope API Key",
+                     aliases=("DASHSCOPE_KEY", "ALIYUN_API_KEY")),
+                _key("DASHSCOPE_ASR_MODEL", "转写模型", required=False, secret=False),
+                _key("DASHSCOPE_BASE_URL", "根地址", required=False, secret=False),
+            ],
+        }],
+    },
     "image": {
         "label": "AI 生图",
         "settings": [],
@@ -108,7 +121,7 @@ MODEL_GROUPS: dict[str, dict[str, Any]] = {
         ],
         "providers": [
             {
-                "id": "dashscope", "name": "阿里 DashScope", "keys": [
+                "id": "dashscope", "name": "阿里千问音频 / Fun-Music", "keys": [
                     _key("DASHSCOPE_API_KEY", "DashScope API Key",
                          aliases=("DASHSCOPE_KEY", "ALIYUN_API_KEY")),
                     _key("DASHSCOPE_MUSIC_MODEL", "音乐模型", required=False, secret=False,
@@ -135,7 +148,7 @@ MODEL_GROUPS: dict[str, dict[str, Any]] = {
         ],
         "providers": [
             {
-                "id": "dashscope", "name": "阿里 CosyVoice", "keys": [
+                "id": "dashscope", "name": "阿里千问 TTS / CosyVoice", "keys": [
                     _key("DASHSCOPE_API_KEY", "DashScope API Key",
                          aliases=("DASHSCOPE_KEY", "ALIYUN_API_KEY")),
                     _key("DASHSCOPE_TTS_MODEL", "TTS 模型", required=False, secret=False),

@@ -63,7 +63,7 @@ UA = (
 
 # provider 默认值（可被 env / --model 覆盖）
 DEFAULT_DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/api/v1"
-DEFAULT_DASHSCOPE_MODEL = "audio-generation"
+DEFAULT_DASHSCOPE_MODEL = "fun-music-v1"
 DEFAULT_SUNO_MODEL = "music-1"
 
 # 每个 provider 声明所需 env（主名 → 别名元组）。check / 报错都基于这份声明。
@@ -257,23 +257,47 @@ def generate_dashscope(args: argparse.Namespace) -> Path:
                 or DEFAULT_DASHSCOPE_BASE).rstrip("/")
     model = args.model or env_lookup("DASHSCOPE_MUSIC_MODEL") or DEFAULT_DASHSCOPE_MODEL
 
-    endpoint = f"{base_url}/services/aigc/text2audio/generation"
+    if model.startswith("qwen-audio-") and model.endswith("-tts-next"):
+        prompt = "生成音乐。" + args.prompt
+        if args.duration:
+            prompt += f"。目标时长约 {args.duration} 秒，结尾自然收束。"
+        if args.instrumental:
+            prompt += "纯音乐，无人声、无说话。"
+        elif args.lyrics:
+            prompt += "。演唱以下歌词：" + args.lyrics
+        output = Path(args.output)
+        fmt = output.suffix.lstrip(".").lower() or "mp3"
+        if fmt not in ("mp3", "wav"):
+            fail("阿里千问音乐输出支持 .mp3 或 .wav。")
+        endpoint = f"{base_url}/services/audio/tts/SpeechSynthesizer"
+        print(f"[dashscope] 生成音乐（model={model}）...", file=sys.stderr)
+        result = http_post(endpoint, {"Authorization": f"Bearer {api_key}"},
+                           {"model": model, "input": {"text_prompt": prompt, "format": fmt,
+                                                       "sample_rate": 48000, "channels": 2}},
+                           timeout=args.timeout)
+        url = _find_audio_url(result.get("output", {}))
+        if not url:
+            fail(f"音乐生成未返回音频：{result.get('message') or result.get('code') or '响应缺少 audio.url'}")
+        return download_audio(url, output)
+
+    endpoint = f"{base_url}/services/audio/music/generation"
     input_block: dict[str, Any] = {"prompt": args.prompt}
     if args.lyrics:
         input_block["lyrics"] = args.lyrics
-    parameters: dict[str, Any] = {}
+    input_block["is_instrumental"] = bool(args.instrumental)
     if args.duration:
-        parameters["duration"] = args.duration
-    # 纯音乐（无人声）；DashScope 用布尔开关表达
-    parameters["instrumental"] = bool(args.instrumental)
-
-    payload = {"model": model, "input": input_block, "parameters": parameters}
+        input_block["prompt"] += f"，目标时长约 {args.duration} 秒"
+    payload = {"model": model, "input": input_block}
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "X-DashScope-Async": "enable",
     }
     print(f"[dashscope] 提交任务到 {endpoint}（model={model}）...", file=sys.stderr)
-    result = http_post(endpoint, headers, payload, timeout=60)
+    result = http_post(endpoint, headers, payload, timeout=args.timeout)
+
+    # Fun-Music 返回完整音频 URL；旧网关可能仍使用异步任务回执。
+    audio_url = _find_audio_url(result.get("output", {}))
+    if audio_url:
+        return download_audio(audio_url, Path(args.output))
 
     output = result.get("output", {})
     if not isinstance(output, dict):
