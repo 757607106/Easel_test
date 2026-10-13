@@ -3239,6 +3239,7 @@ async def api_chat_stream(req: ChatRequest):
         event_seq = 0
         full_text: list[str] = []        # 累积完整回答，供断线取回
         timed_out = False                # 只有真·超时才 terminate 进程；断线绝不杀
+        clean_end = False
 
         # Claim this turn before waiting for locks, so recovery cannot return the previous turn.
         if not direct and not alternate:
@@ -3313,6 +3314,7 @@ async def api_chat_stream(req: ChatRequest):
                             "POST", chat_completions_url(),
                             json=body, headers=headers) as resp:
                         if resp.status_code != 200:
+                            run_info["http_error"] = True
                             raw = (await resp.aread())[:200].decode("utf-8", "replace")
                             to_client("error", f"❌ 对话失败（HTTP {resp.status_code}）：{raw[:160]}")
                             return
@@ -3322,15 +3324,20 @@ async def api_chat_stream(req: ChatRequest):
                             payload = line[5:].lstrip()   # SSE 允许 `data:{…}`（冒号后无空格）
                             if payload == "[DONE]":
                                 saw_done = True
+                                run_info["http_done"] = True
                                 break
                             try:
                                 d = json.loads(payload)
                             except ValueError:
                                 continue
                             if isinstance(d.get("error"), dict):   # 200 里夹错误对象：不能当正常流吞掉
+                                run_info["http_error"] = True
                                 to_client("error", f"❌ 网关返回错误：{str(d['error'])[:160]}")
                                 return
-                            delta = (d.get("choices") or [{}])[0].get("delta") or {}
+                            choice = (d.get("choices") or [{}])[0]
+                            if choice.get("finish_reason"):
+                                run_info["stop_reason"] = choice["finish_reason"]
+                            delta = choice.get("delta") or {}
                             # 思考流的两个可能来源，先到先得（`sse_thinking` 闩锁，防两路都来时重复）：
                             # ① 这里的 reasoning 增量 —— openclaw 2026.6.11 的 chat/completions
                             #    实现里 reasoning/thinking 出现 0 次，**不会**给；留着是给别的网关/
@@ -3344,6 +3351,8 @@ async def api_chat_stream(req: ChatRequest):
                             c = delta.get("content")
                             if c:
                                 got_text = True
+                                run_info["token_chars"] += len(c)
+                                run_info["text_tail"] = (run_info.get("text_tail", "") + c)[-160:]
                                 _emit("token", c)
                             if delta.get("tool_calls") and not tool_noted:
                                 tool_noted = True
@@ -3357,6 +3366,7 @@ async def api_chat_stream(req: ChatRequest):
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
+                run_info["http_error"] = True
                 to_client("error", f"❌ 网关连接失败：{str(e)[:140]}")
             finally:
                 # 先把 SENTINEL 排进 q（FIFO 保证它排在本轮所有 token 之后），再标记完成：
@@ -3666,6 +3676,13 @@ async def api_chat_stream(req: ChatRequest):
                 except Exception:
                     pass
             sr = run_info.get("stop_reason")
+            # HTTP 响应属于本次请求；共享 raw 日志可能在 message_end 后才补写
+            # text_delta。按本次 SSE 的结束原因和终止帧判定，避免正常回答被误报中断。
+            clean_end = bool(
+                (run_info.get("http_done") and sr == "stop" and not run_info.get("http_error")
+                 if is_http else run_info.get("last_ev") == "assistant_message_end")
+                and rc == 0 and not timed_out and sk not in _STOPPED_CHAT
+            )
             if not emitted:
                 clean = clean_agent_output("".join(stdout_lines))
                 if clean:
@@ -3678,7 +3695,7 @@ async def api_chat_stream(req: ChatRequest):
             # 收尾检测：即使已吐了内容，只要不是「正常收尾」就显式告知——
             # 否则被截断（触顶）/被杀（负载）/流被中断，都会被当成「清晰地答完了」，
             # 用户看到的就是「答一半突然停、也不说做完」（本 bug 根因）。
-            # 正常收尾的唯一标志：raw 流最后一个事件是 assistant_message_end。
+            # CLI 以 raw 流为准，HTTP 以本请求的 SSE 结束标记为准。
             # 用户显式「停止」不是异常中断 → 不报「被中断」告警（前端已就地标注「已停止」）。
             if (emitted or run_info["thinking_chars"]) and sk not in _STOPPED_CHAT:
                 note = None
@@ -3691,7 +3708,8 @@ async def api_chat_stream(req: ChatRequest):
                 elif sr == "tool_use":
                     note = ("\n\n---\n⚠️ 我刚做完这一步、**正要执行下一步操作时中断了**"
                             "（本轮以工具调用结尾却没能继续，前端把它当成答完了）。回我「继续」我接着做。")
-                elif run_info.get("last_ev") not in (None, "assistant_message_end"):
+                elif (is_http and not clean_end) or (
+                        not is_http and run_info.get("last_ev") not in (None, "assistant_message_end")):
                     note = ("\n\n---\n⚠️ 这条**可能没写完**——模型的输出/思考流被中断、没有正常收尾"
                             "（多为网络或模型代理把长回复的流掐断了）。回我「继续」，或重试。")
                 elif run_info.get("text_tail", "").rstrip()[-1:] in ("：", ":"):
@@ -3737,7 +3755,7 @@ async def api_chat_stream(req: ChatRequest):
                         "rc": proc.poll(),
                         "stop_reason": run_info["stop_reason"],
                         "last_ev": run_info["last_ev"],
-                        "clean_end": run_info["last_ev"] == "assistant_message_end",
+                        "clean_end": clean_end,
                         "saw_message_end": run_info["saw_message_end"],
                         "fetch_count": run_info["fetch_count"],
                         "token_chars": run_info["token_chars"],
@@ -3752,7 +3770,7 @@ async def api_chat_stream(req: ChatRequest):
             # 落盘完整结果：后端跑完整轮不依赖客户端连接，断线后前端用 /api/chat/last 取回
             _save_turn(pk, "done", "".join(full_text), {
                 "turn_id": turn_id,
-                "clean_end": run_info.get("last_ev") == "assistant_message_end",
+                "clean_end": clean_end,
                 "stop_reason": "user_stopped" if user_stopped else run_info.get("stop_reason"),
             })
             xlock.release()
